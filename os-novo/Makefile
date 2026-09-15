@@ -1,64 +1,42 @@
+# Kompajlerske alate definišemo
+CXX = riscv64-unknown-elf-g++
+AS  = riscv64-unknown-elf-gcc
+LD  = riscv64-unknown-elf-ld
 
-TOOLCHAIN_PREFIX ?= riscv64-unknown-elf-
-CC      := $(TOOLCHAIN_PREFIX)gcc
-CXX     := $(TOOLCHAIN_PREFIX)g++
-AS      := $(TOOLCHAIN_PREFIX)gcc
-LD      := $(TOOLCHAIN_PREFIX)g++
-QEMU    := qemu-system-riscv64
+# Flegovi za C++20/23 bare-metal
+CXXFLAGS = -mcmodel=medany -std=c++20 -Wall -Wextra -ffreestanding -fno-exceptions -fno-rtti -nostdlib -O2 -g
+ASFLAGS  = -mcmodel=medany -g
+LDFLAGS  = -T kernel.ld
 
-TARGET  := kernel.elf
+# QEMU Flegovi (-bios none sprečava preklapanje sa OpenSBI)
+QEMUFLAGS = -machine virt -cpu rv64 -smp 1 -m 128M -nographic -bios none -kernel kernel.elf
 
-ARCH_FLAGS := -march=rv64gc -mabi=lp64d -mcmodel=medany
+# Fajlovi
+AS_SRCS  = boot.S
+CXX_SRCS = main.cpp kalloc.cpp uart.cpp
+OBJS     = $(AS_SRCS:.S=.o) $(CXX_SRCS:.cpp=.o)
 
-GCC_INC := $(shell $(CXX) -print-file-name=include)
+all: kernel.elf
 
-COMMON_FLAGS := $(ARCH_FLAGS) -O2 -g -Wall -Wextra \
-                -ffreestanding -nostdlib -fno-builtin \
-                -fno-stack-protector -fno-omit-frame-pointer \
-                -I$(GCC_INC) -I.
-
-CXXFLAGS := $(COMMON_FLAGS) -std=c++20 -fno-exceptions -fno-rtti
-CFLAGS   := $(COMMON_FLAGS) -std=c11
-ASFLAGS  := $(ARCH_FLAGS) -g -D__ASSEMBLY__
-LDFLAGS  := $(ARCH_FLAGS) -T kernel.ld -nostdlib -Wl,--gc-sections
-
-ASM_SRCS := $(shell find . -type f -name "*.S")
-C_SRCS   := $(shell find . -type f -name "*.c")
-CPP_SRCS := $(shell find . -type f -name "*.cpp")
-
-BUILD_DIR := build
-OBJS := $(addprefix $(BUILD_DIR)/, $(ASM_SRCS:.S=.o)) \
-        $(addprefix $(BUILD_DIR)/, $(C_SRCS:.c=.o)) \
-        $(addprefix $(BUILD_DIR)/, $(CPP_SRCS:.cpp=.o))
-
-all: $(TARGET)
-
-$(TARGET): $(OBJS) kernel.ld
-	@echo "[LD] Linkujem $@..."
-	@$(LD) $(LDFLAGS) $(OBJS) -o $@
-	@echo "--- Uspešno kreiran bare-metal C++20/23 kernel! ---"
-
-$(BUILD_DIR)/%.o: %.S
-	@mkdir -p $(dir $@)
+%.o: %.S
 	@echo "[AS] $<"
 	@$(AS) $(ASFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/%.o: %.c
-	@mkdir -p $(dir $@)
-	@echo "[CC] $<"
-	@$(CC) $(CFLAGS) -c $< -o $@
-
-$(BUILD_DIR)/%.o: %.cpp
-	@mkdir -p $(dir $@)
+%.o: %.cpp
 	@echo "[CXX] $<"
 	@$(CXX) $(CXXFLAGS) -c $< -o $@
 
-run: $(TARGET)
+kernel.elf: $(OBJS)
+	@echo "[LD] Linkujem kernel.elf..."
+	@$(LD) $(LDFLAGS) $(OBJS) -o $@
+	@echo "--- Uspešno kreiran bare-metal C++20/23 kernel! ---"
+
+run: kernel.elf
 	@echo "[QEMU] Pokrećem kernel u QEMU..."
-	@$(QEMU) -machine virt -cpu rv64 -smp 1 -m 128M -nographic -kernel $(TARGET)
+	@qemu-system-riscv64 $(QEMUFLAGS)
 
 clean:
-	@rm -rf $(BUILD_DIR) $(TARGET)
-	@echo "[CLEAN] Očišćeno."
+	@rm -f *.o kernel.elf
+	@echo "Očišćeno."
 
 .PHONY: all run clean

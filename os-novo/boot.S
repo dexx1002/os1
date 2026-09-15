@@ -1,7 +1,7 @@
-.section .entry_os
-.global _entry
+.section .entry_os, "ax"
+.global _start
 
-_entry:
+_start:
     # 1. Postavi pokazivač steka (sp)
     la sp, stack_top
 

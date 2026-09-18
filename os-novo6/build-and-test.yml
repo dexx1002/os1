@@ -1,0 +1,36 @@
+name: build-and-test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-run:
+    runs-on: ubuntu-24.04
+
+    # VAŽNO: projekat trenutno živi u podfolderu (os-novo5) jednog većeg
+    # repoa, ne u korenu -- ako se folder kasnije preimenuje (os-novo6...)
+    # ili se projekat prebaci u sopstveni repo, ovu liniju treba ažurirati
+    # (ili je ukloniti ako Makefile bude u korenu).
+    defaults:
+      run:
+        working-directory: os-novo5
+
+    steps:
+      - name: Preuzmi kod
+        uses: actions/checkout@v4
+
+      - name: Instaliraj RISC-V toolchain i QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-riscv64-unknown-elf qemu-system-misc
+
+      - name: Build
+        run: make
+
+      # 'make run' vraća isti exit kod koji je kernel upisao u QEMU-ov
+      # poweroff uređaj (0 = svi testovi prošli, 1 = bar jedan pao) --
+      # GitHub Actions automatski markira korak (i ceo build) kao neuspešan
+      # ako ova komanda vrati nenulti kod, bez potrebe za grep-ovanjem izlaza.
+      - name: Pokreni u QEMU i proveri testove
+        run: make run

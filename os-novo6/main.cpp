@@ -1,6 +1,7 @@
 #include "riscv.hpp"
 #include "scheduler.hpp"
 #include "semaphore.hpp"
+#include "smp.hpp"
 
 extern "C" {
 void  putc(char c);
@@ -80,11 +81,6 @@ uint64_t lastTrapCause = 0;
 // vrednost nikad ne menja i da petlju optimizuje u beskonačnu.
 volatile uint64_t timerTicks = 0;
 
-// ~0.2s po tiku na QEMU 'virt' CLINT-u (koji radi na 10 MHz) -- proizvoljno
-// biran interval, dovoljno čest da test ne čeka predugo, dovoljno redak da
-// ne poplavi UART ispis kad kasnije budemo dodavali print po tiku.
-constexpr uint64_t TimerIntervalTicks = 2'000'000;
-
 // Test preemptivnog schedulera: obe niti beskonacno inkrementiraju
 // SOPSTVENI brojac, bez ijednog eksplicitnog ustupanja procesora. Ako obe
 // napreduju do kraja testa, to je dokaz da tajmer prekid stvarno,
@@ -155,6 +151,37 @@ void consumerBody(void*) {
     }
 }
 
+// Dokaz PRAVE paralelnosti (ne samo naizmeničnog deljenja jednog jezgra):
+// svaka od dve niti izmeri sopstveni [start,end] vremenski prozor (preko
+// CLINT mtime, ZAJEDNIČKOG sata za sve hartove) dok radi fiksan broj
+// iteracija. Ako se ta dva prozora PREKLAPAJU, to je dokaz da su stvarno
+// radile ISTOVREMENO na dva fizička jezgra -- na jednom jezgru (ili sa
+// pokvarenim SMP-om gde bi se, npr., nit prikovana za hart 1 nikad ne
+// pokrene) prozori bi ili bili strogo sekvencijalni, ili bi jedan od njih
+// ostao [0, 0] (nit koja se nikad nije izvršila).
+struct SmpWindow {
+    volatile uint64_t start = 0;
+    volatile uint64_t end   = 0;
+};
+SmpWindow smpWindowA;
+SmpWindow smpWindowB;
+
+// Dovoljno veliko da potraje merljiv broj mtime tik-ova na QEMU TCG
+// emulaciji, ali ne toliko veliko da test predugo traje.
+constexpr uint64_t SmpSpinIterations = 60'000'000;
+
+void smpWorker(void* arg) {
+    auto* window  = static_cast<SmpWindow*>(arg);
+    window->start = RISCV::Clint::readMtime();
+
+    volatile uint64_t sink = 0;
+    for (uint64_t i = 0; i < SmpSpinIterations; ++i) {
+        sink = sink + 1;
+    }
+
+    window->end = RISCV::Clint::readMtime();
+}
+
 } // namespace
 
 // 'frame' trenutno nije u upotrebi -- ostaje ovde tipiziran i spreman za
@@ -171,7 +198,7 @@ extern "C" void handleTrap(RISCV::TrapFrame* frame) {
         // scheduler "tick" (poziv dispatch-a), pa ne želimo UART pisanje
         // na kritičnoj putanji.
         timerTicks = timerTicks + 1; // ne ++ -- C++20 deprecira ++ na volatile
-        RISCV::Clint::writeMtimecmp(RISCV::Clint::readMtime() + TimerIntervalTicks);
+        RISCV::Clint::writeMtimecmp(RISCV::Clint::readMtime() + RISCV::TimerIntervalTicks);
         schedulerTick();
         return;
     }
@@ -226,13 +253,7 @@ int main() {
         constexpr uint64_t ExpectedTicks = 5;
 
         timerTicks = 0;
-        RISCV::Clint::writeMtimecmp(RISCV::Clint::readMtime() + TimerIntervalTicks);
-
-        RISCV::writeCsr<RISCV::Csr::MIe>(RISCV::readCsr<RISCV::Csr::MIe>() |
-                                          RISCV::InterruptEnableBits::MachineTimer);
-        RISCV::writeCsr<RISCV::Csr::MStatus>(
-            RISCV::readCsr<RISCV::Csr::MStatus>() |
-            RISCV::StatusBits::MachineInterruptEnable);
+        RISCV::armPeriodicTimer();
 
         while (timerTicks < ExpectedTicks) {
             asm volatile("wfi");
@@ -251,6 +272,15 @@ int main() {
                     timerTicks >= ExpectedTicks);
     }
 
+    // Od ovog trenutka je hart 1 zvanično "u igri" -- pridružuje se
+    // scheduleru i učestvuje u SVIM narednim testovima (uključujući
+    // postojeće preemptivni scheduler/semafor testove, koji sad rade u
+    // pravom 2-hart okruženju, ne samo na hartu 0 kao ranije). Alokator i
+    // tajmer testovi iznad ove linije su već jednonitno (hart 0) završeni
+    // pre nego što hart 1 uopšte krene da radi bilo šta sa deljenim
+    // stanjem.
+    smpSignalStart();
+
     printString("\n[Preemptivni scheduler]\n");
     {
         preempt.a = 0;
@@ -263,12 +293,7 @@ int main() {
 
         // Ponovo palimo tajmer (ugašen posle prošlog testa) -- ovog puta
         // trajno, jer scheduler njime upravlja preotimanjem.
-        RISCV::Clint::writeMtimecmp(RISCV::Clint::readMtime() + TimerIntervalTicks);
-        RISCV::writeCsr<RISCV::Csr::MIe>(RISCV::readCsr<RISCV::Csr::MIe>() |
-                                          RISCV::InterruptEnableBits::MachineTimer);
-        RISCV::writeCsr<RISCV::Csr::MStatus>(
-            RISCV::readCsr<RISCV::Csr::MStatus>() |
-            RISCV::StatusBits::MachineInterruptEnable);
+        RISCV::armPeriodicTimer();
 
         // Nijedna od niti sama ne ustupa procesor (beskonačne petlje) --
         // jedini način da obe napreduju je da ih tajmer prekid PRINUDNO
@@ -309,12 +334,7 @@ int main() {
         schedulerAddThread(producer);
         schedulerAddThread(consumer);
 
-        RISCV::Clint::writeMtimecmp(RISCV::Clint::readMtime() + TimerIntervalTicks);
-        RISCV::writeCsr<RISCV::Csr::MIe>(RISCV::readCsr<RISCV::Csr::MIe>() |
-                                          RISCV::InterruptEnableBits::MachineTimer);
-        RISCV::writeCsr<RISCV::Csr::MStatus>(
-            RISCV::readCsr<RISCV::Csr::MStatus>() |
-            RISCV::StatusBits::MachineInterruptEnable);
+        RISCV::armPeriodicTimer();
 
         // Obe niti se same zaustave posle tacno ItemsToProduce stavki (za
         // razliku od prethodnog testa) -- 20 tik-ova je gornja granica za
@@ -341,6 +361,53 @@ int main() {
         tests.check("suma potrosenih vrednosti je tacno 1+2+...+10 = 55 "
                     "(dokaz da nema izgubljenih/dupliranih stavki)",
                     consumedSum == ExpectedSum);
+    }
+
+    printString("\n[SMP paralelizam]\n");
+    {
+        smpWindowA = SmpWindow{};
+        smpWindowB = SmpWindow{};
+
+        // Round-robin raspodela u schedulerAddThread() nastavlja se odatle
+        // gde su prethodni testovi stali -- pošto smo do sada dodali paran
+        // broj niti (2 + 2), ova dva poziva ponovo padaju na hart 0 pa
+        // hart 1, redom, baš kao i ranije. Ne oslanjamo se na to eksplicitno
+        // (test proverava STVARNO preklapanje, ne pretpostavlja raspored),
+        // ali je vredno spomenuti zašto se očekuje da rade paralelno.
+        TCB* workerA = createThread(smpWorker, &smpWindowA);
+        TCB* workerB = createThread(smpWorker, &smpWindowB);
+        schedulerAddThread(workerA);
+        schedulerAddThread(workerB);
+
+        schedulerRequestStopAfter(40);
+        schedulerRun();
+
+        RISCV::writeCsr<RISCV::Csr::MStatus>(
+            RISCV::readCsr<RISCV::Csr::MStatus>() &
+            ~RISCV::StatusBits::MachineInterruptEnable);
+
+        printString("  A: [");
+        printDecimal(static_cast<unsigned>(smpWindowA.start));
+        printString(", ");
+        printDecimal(static_cast<unsigned>(smpWindowA.end));
+        printString("]\n  B: [");
+        printDecimal(static_cast<unsigned>(smpWindowB.start));
+        printString(", ");
+        printDecimal(static_cast<unsigned>(smpWindowB.end));
+        printString("]\n");
+
+        const bool bothRan = smpWindowA.end > smpWindowA.start &&
+                              smpWindowB.end > smpWindowB.start;
+        const auto overlapStart =
+            smpWindowA.start > smpWindowB.start ? smpWindowA.start : smpWindowB.start;
+        const auto overlapEnd =
+            smpWindowA.end < smpWindowB.end ? smpWindowA.end : smpWindowB.end;
+
+        tests.check("obe niti su stvarno izvrsene (oba prozora ne-nulta)", bothRan);
+        tests.check(
+            "vremenski prozori A i B se preklapaju (dokaz prave paralelnosti "
+            "na dva fizicka harta, ne samo naizmenicnog deljenja jednog)",
+            bothRan && overlapStart < overlapEnd);
     }
 
     printString("\n[Trap / ecall]\n");

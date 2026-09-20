@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="sr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>os-novo trace viewer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #12140f;
+    --bg-panel:  #1a1d16;
+    --ink:       #d9dccb;
+    --ink-dim:   #8b8f7a;
+    --line:      #2c2f24;
+    --amber:     #e8b04b;
+    --green:     #7ec98f;
+    --red:       #d97a6c;
+    --thread-0:  #e8b04b;
+    --thread-1:  #7ec98f;
+    --thread-2:  #7aa2d9;
+    --thread-3:  #d97a6c;
+    --thread-4:  #b78fd9;
+    --thread-5:  #6fc2c9;
+    --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    --sans: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  * { box-sizing: inherit; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.5;
+  }
+  .wrap {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 48px 24px 80px;
+  }
+  header {
+    margin-bottom: 32px;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 24px;
+  }
+  .kicker {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--amber);
+    margin: 0 0 8px;
+  }
+  h1 {
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: 28px;
+    margin: 0 0 12px;
+    color: var(--ink);
+    letter-spacing: -0.01em;
+  }
+  header p {
+    color: var(--ink-dim);
+    max-width: 62ch;
+    margin: 0;
+    font-size: 15px;
+  }
+  section { margin-bottom: 40px; }
+  label {
+    display: block;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--ink-dim);
+    margin-bottom: 10px;
+  }
+  textarea {
+    width: 100%;
+    min-height: 160px;
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 14px;
+    resize: vertical;
+  }
+  textarea:focus { outline: 1px solid var(--amber); border-color: var(--amber); }
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-top: 14px;
+    flex-wrap: wrap;
+  }
+  button {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 500;
+    background: var(--amber);
+    color: #1a1305;
+    border: none;
+    border-radius: 4px;
+    padding: 10px 18px;
+    cursor: pointer;
+  }
+  button:hover { filter: brightness(1.08); }
+  button.ghost {
+    background: transparent;
+    color: var(--ink-dim);
+    border: 1px solid var(--line);
+  }
+  button.ghost:hover { color: var(--ink); border-color: var(--ink-dim); }
+  #status { font-family: var(--mono); font-size: 13px; color: var(--ink-dim); }
+  #status.err { color: var(--red); }
+  #status.ok { color: var(--green); }
+
+  .panel {
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 24px;
+    overflow-x: auto;
+  }
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 20px;
+    margin-bottom: 20px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-dim);
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
+
+  svg { display: block; }
+  .lane-label {
+    font-family: var(--mono);
+    font-size: 12px;
+    fill: var(--ink-dim);
+  }
+  .axis-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    fill: var(--ink-dim);
+  }
+  .bar-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    fill: #0d0f0a;
+    font-weight: 600;
+  }
+  .grid-line { stroke: var(--line); stroke-width: 1; }
+  .lane-bg { fill: #15170f; }
+
+  .empty {
+    font-family: var(--mono);
+    color: var(--ink-dim);
+    font-size: 13px;
+    padding: 40px 0;
+    text-align: center;
+  }
+
+  footer {
+    margin-top: 48px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-dim);
+    border-top: 1px solid var(--line);
+    padding-top: 20px;
+  }
+  footer code { color: var(--ink); }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .bar { transition: opacity 0.15s ease; }
+  }
+  .bar:hover { opacity: 0.85; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <p class="kicker">os-novo &middot; profiling / tracing alat</p>
+    <h1>Trace viewer</h1>
+    <p>
+      Nalepi ceo izlaz iz <code style="font-family:var(--mono)">make run</code>
+      (ili samo deo između <code style="font-family:var(--mono)">TRACE START</code>
+      i <code style="font-family:var(--mono)">TRACE END</code> markera) u polje ispod.
+      Alat parsira linije oblika <code style="font-family:var(--mono)">TRACE,timestamp,hart,threadId,event</code>
+      i crta zauzeće svakog harta kroz vreme.
+    </p>
+  </header>
+
+  <section>
+    <label for="input">Trag (CSV izlaz sa QEMU konzole)</label>
+    <textarea id="input" spellcheck="false" placeholder="TRACE,92140104,0,4,DISPATCH
+TRACE,92200311,0,4,PREEMPTED
+..."></textarea>
+    <div class="controls">
+      <button id="render">Vizualizuj</button>
+      <button id="sample" class="ghost">Ucitaj primer</button>
+      <span id="status"></span>
+    </div>
+  </section>
+
+  <section>
+    <div class="panel" id="chartPanel">
+      <div class="empty" id="emptyState">Nema jos ucitanog traga &mdash; nalepi izlaz iznad i klikni &bdquo;Vizualizuj&ldquo;.</div>
+      <div id="legend" class="legend" style="display:none"></div>
+      <svg id="chart" style="display:none"></svg>
+    </div>
+  </section>
+
+  <footer>
+    Format zapisa: <code>TRACE,&lt;mtime&gt;,&lt;hart&gt;,&lt;threadId&gt;,&lt;DISPATCH|PREEMPTED|BLOCKED|WOKEN|FINISHED&gt;</code><br>
+    Trake predstavljaju vreme koje je nit stvarno provela izvršavajući se na datom hartu
+    (od DISPATCH do sledećeg PREEMPTED/BLOCKED/FINISHED na istom hartu).
+    Male oznake ispod traka su WOKEN događaji (nit postala spremna, ne nužno na tom hartu).
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  const THREAD_COLORS = [
+    'var(--thread-0)', 'var(--thread-1)', 'var(--thread-2)',
+    'var(--thread-3)', 'var(--thread-4)', 'var(--thread-5)'
+  ];
+
+  const input      = document.getElementById('input');
+  const renderBtn   = document.getElementById('render');
+  const sampleBtn   = document.getElementById('sample');
+  const statusEl    = document.getElementById('status');
+  const emptyState  = document.getElementById('emptyState');
+  const legendEl    = document.getElementById('legend');
+  const svg         = document.getElementById('chart');
+
+  const SAMPLE = [
+    'TRACE,92140104,0,4,DISPATCH',
+    'TRACE,92140072,1,5,DISPATCH',
+    'TRACE,92200311,0,4,PREEMPTED',
+    'TRACE,92200311,0,4,DISPATCH',
+    'TRACE,92260522,1,5,PREEMPTED',
+    'TRACE,92260522,1,5,DISPATCH',
+    'TRACE,92400411,0,4,BLOCKED',
+    'TRACE,92400500,1,5,WOKEN',
+    'TRACE,92450233,1,5,PREEMPTED',
+    'TRACE,92450233,0,4,DISPATCH',
+    'TRACE,92600100,0,4,FINISHED',
+    'TRACE,92650411,1,5,DISPATCH',
+    'TRACE,93090344,1,5,FINISHED'
+  ].join('\n');
+
+  function parse(text) {
+    const records = [];
+    const lines = text.split('\n');
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('TRACE,')) continue;
+      const parts = trimmed.split(',');
+      if (parts.length !== 5) continue;
+      const timestamp = Number(parts[1]);
+      const hart      = Number(parts[2]);
+      const threadId  = Number(parts[3]);
+      const event     = parts[4].trim();
+      if (Number.isNaN(timestamp) || Number.isNaN(hart) || Number.isNaN(threadId)) continue;
+      records.push({ timestamp, hart, threadId, event });
+    }
+    records.sort((a, b) => a.timestamp - b.timestamp);
+    return records;
+  }
+
+  function buildIntervals(records) {
+    const harts = [...new Set(records.map(r => r.hart))].sort((a, b) => a - b);
+    const intervals = []; // { hart, threadId, start, end }
+    const wokenMarks = []; // { timestamp, threadId }
+    const running = {}; // hart -> { threadId, start }
+
+    for (const r of records) {
+      if (r.event === 'WOKEN') {
+        wokenMarks.push({ timestamp: r.timestamp, threadId: r.threadId });
+        continue;
+      }
+      if (r.event === 'DISPATCH') {
+        running[r.hart] = { threadId: r.threadId, start: r.timestamp };
+        continue;
+      }
+      // PREEMPTED / BLOCKED / FINISHED -- zatvara tekuci interval na tom hartu
+      const open = running[r.hart];
+      if (open) {
+        intervals.push({
+          hart: r.hart, threadId: open.threadId,
+          start: open.start, end: r.timestamp
+        });
+        delete running[r.hart];
+      }
+    }
+    return { harts, intervals, wokenMarks };
+  }
+
+  function threadColor(id) {
+    return THREAD_COLORS[id % THREAD_COLORS.length];
+  }
+
+  function render() {
+    const records = parse(input.value);
+    if (records.length === 0) {
+      statusEl.textContent = 'Nijedna TRACE, linija nije prepoznata u nalepljenom tekstu.';
+      statusEl.className = 'err';
+      emptyState.style.display = 'block';
+      legendEl.style.display = 'none';
+      svg.style.display = 'none';
+      return;
+    }
+
+    const { harts, intervals, wokenMarks } = buildIntervals(records);
+    const threadIds = [...new Set(records.map(r => r.threadId))].sort((a, b) => a - b);
+
+    const minT = Math.min(...records.map(r => r.timestamp));
+    const maxT = Math.max(...records.map(r => r.timestamp));
+    const span = Math.max(maxT - minT, 1);
+
+    const width      = 880;
+    const laneHeight = 60;
+    const laneGap    = 14;
+    const marginLeft = 70;
+    const marginTop  = 20;
+    const marginBot  = 30;
+    const plotWidth  = width - marginLeft - 20;
+    const height     = marginTop + harts.length * (laneHeight + laneGap) + marginBot;
+
+    const x = t => marginLeft + ((t - minT) / span) * plotWidth;
+
+    let svgParts = [];
+
+    // Pozadina traka
+    harts.forEach((hart, i) => {
+      const y = marginTop + i * (laneHeight + laneGap);
+      svgParts.push(`<rect class="lane-bg" x="${marginLeft}" y="${y}" width="${plotWidth}" height="${laneHeight}" rx="4"></rect>`);
+      svgParts.push(`<text class="lane-label" x="12" y="${y + laneHeight / 2 + 4}">Hart ${hart}</text>`);
+    });
+
+    // Vertikalne linije mreze (5 podeoka)
+    for (let i = 0; i <= 4; i++) {
+      const t = minT + (span * i) / 4;
+      const gx = x(t);
+      svgParts.push(`<line class="grid-line" x1="${gx}" y1="${marginTop}" x2="${gx}" y2="${marginTop + harts.length * (laneHeight + laneGap) - laneGap}"></line>`);
+      svgParts.push(`<text class="axis-label" x="${gx}" y="${marginTop + harts.length * (laneHeight + laneGap) - laneGap + 16}" text-anchor="middle">+${Math.round(t - minT)}</text>`);
+    }
+
+    // Trake zauzeca
+    for (const iv of intervals) {
+      const hartIdx = harts.indexOf(iv.hart);
+      const y = marginTop + hartIdx * (laneHeight + laneGap) + 8;
+      const barH = laneHeight - 16;
+      const bx = x(iv.start);
+      const bw = Math.max(x(iv.end) - bx, 2);
+      const color = threadColor(iv.threadId);
+      svgParts.push(
+        `<rect class="bar" x="${bx.toFixed(1)}" y="${y}" width="${bw.toFixed(1)}" height="${barH}" rx="3" fill="${color}">` +
+        `<title>nit ${iv.threadId} na hartu ${iv.hart}: [${iv.start}, ${iv.end}]</title></rect>`
+      );
+      if (bw > 22) {
+        svgParts.push(`<text class="bar-label" x="${(bx + bw / 2).toFixed(1)}" y="${y + barH / 2 + 4}" text-anchor="middle">T${iv.threadId}</text>`);
+      }
+    }
+
+    // WOKEN oznake -- male trouglaste kapice ispod odgovarajuce trake (po hartu na kom je signal pozvan)
+    for (const w of wokenMarks) {
+      const hartIdx = 0; // signal moze doci sa bilo kog harta; prikazujemo na zajednickoj liniji ispod grafikona
+      const wx = x(w.timestamp);
+      const wy = marginTop + harts.length * (laneHeight + laneGap) - laneGap + 2;
+      svgParts.push(`<polygon points="${wx-4},${wy} ${wx+4},${wy} ${wx},${wy+7}" fill="${threadColor(w.threadId)}"><title>nit ${w.threadId} probudjena u t=${w.timestamp}</title></polygon>`);
+    }
+
+    svg.setAttribute('viewBox', `0 0 ${width} ${height + 14}`);
+    svg.setAttribute('width', '100%');
+    svg.setAttribute('height', height + 14);
+    svg.innerHTML = svgParts.join('');
+    svg.style.display = 'block';
+
+    legendEl.innerHTML = threadIds.map(id =>
+      `<span><span class="swatch" style="background:${threadColor(id)}"></span>nit ${id}</span>`
+    ).join('') + '<span><span class="swatch" style="background:var(--ink-dim);clip-path:polygon(0 0,100% 0,50% 100%)"></span>WOKEN dogadjaj</span>';
+    legendEl.style.display = 'flex';
+
+    emptyState.style.display = 'none';
+    statusEl.textContent = `Ucitano ${records.length} dogadjaja, ${intervals.length} intervala zauzeca preko ${harts.length} harta.`;
+    statusEl.className = 'ok';
+  }
+
+  renderBtn.addEventListener('click', render);
+  sampleBtn.addEventListener('click', () => {
+    input.value = SAMPLE;
+    render();
+  });
+})();
+</script>
+</body>
+</html>

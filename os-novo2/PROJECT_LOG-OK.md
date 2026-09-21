@@ -1,0 +1,662 @@
+# os-novo — Bare-Metal RISC-V C++20 Kernel
+
+Prateći dokument projekta: odakle je krenulo, šta je urađeno do sada, tehničke
+odluke i zašto, i šta je dalje u planu. Cilj projekta: CV/portfolio komad za
+prijavu na praksu "Intern Software Engineer – Low Level SW Engineering"
+(Tenstorrent) — nezavisan, samostalan bare-metal RISC-V projekat koji radi
+direktno na QEMU-u, bez ikakve zavisnosti od fakultetske infrastrukture.
+
+---
+
+## 1. Kontekst i polazna tačka
+
+Projekat je inspirisan predmetom **Operativni sistemi 1** (zadatak: niti,
+semafori, memorijski alokator, preemptive scheduler — sve statički povezano
+sa `xv6`-om kao "host" sistemom koji priprema hardver i predaje kontrolu u
+supervisor režimu).
+
+**Zašto ne samo okačiti fakultetski projekat na CV:**
+- U eri AI-a, "još jedan OS1 projekat" na GitHub-u nosi sve manju težinu kao
+  dokaz samostalnosti.
+- Fakultetski projekat zahteva staru VM sliku da bi se pokrenuo (zbog
+  zaključanih `.lib` fajlova kompajliranih za stariju verziju alata).
+- Deo infrastrukture (`hw.h`, `console.h`, `mem.h` + kompajlirani `.lib`
+  fajlovi) je kursno vlasništvo — direktno objavljivanje "otključane" zamene
+  za njih otvara pitanja akademske politike.
+
+**Odluka:** izgraditi **potpuno nezavisnu** verziju — isti koncepti (niti,
+scheduler, semafori), ali napisani iznova, bez ijedne linije/fajla iz
+kursnog materijala, bez `xv6` hosta, direktno na `qemu-system-riscv64`.
+
+---
+
+## 2. Istorija razvoja (hronološki)
+
+### Faza 0 — `os-novo` (osnovni bare-metal kernel)
+Prvi, minimalni bare-metal kernel: boot sekvenca, UART ispis, čitanje CSR
+registara, prost bump alokator, trap handling za `ecall`. Banner je tvrdio
+"C++20/23 kernel", ali kod je u suštini bio C sa `namespace`-ovima — nije
+stvarno koristio C++20 feature-e.
+
+### Faza 1 — Refaktor u pravi C++20
+Cilj: da "C++20" oznaka bude zaslužena, ne marketing. Izmene:
+- `<cstdint>`/`<cstddef>` → **GCC/Clang builtin tipovi** (`__UINT64_TYPE__`
+  itd.), jer ovaj konkretan toolchain (minimalan `riscv64-unknown-elf-g++`)
+  **nema** standardne freestanding header-e. Ovo objašnjava i zašto je
+  originalni (fakultetski) kod ručno definisao tipove — verovatno isti
+  problem tada.
+- `enum class Csr` + **template + non-type template parametar** za
+  generičko čitanje/pisanje CSR-ova (`readCsr<Csr::MCause>()`) umesto
+  posebne funkcije po registru.
+- `enum class TrapCause` umesto sirovih brojeva (8/9/11) za uzroke `ecall`-a.
+- `TrapFrame` struct sa `static_assert`-ovima koji **garantuju** da C++
+  layout odgovara redosledu čuvanja registara u `boot.S` — ako neko izmeni
+  jedan fajl bez drugog, build puca umesto da tiho uvede bag.
+- `[[nodiscard]]` na `kalloc`/`getc` (ignorisanje povratne vrednosti je
+  verovatnije bag nego namera).
+- `boot.S`: `SAVE_REGS`/`RESTORE_REGS` makroi umesto ručnog ponavljanja 30+
+  linija dva puta.
+
+**Uhvaćen i ispravljen bag:** `static_assert(sizeof(TrapFrame) == 256)` je
+prvobitno pretpostavio 32 sačuvana registra — `boot.S` u stvari čuva **31**
+registar (248B), a `sp` pomera za 256B zbog RISC-V ABI zahteva za 16-bajtno
+poravnanje steka. Ispravljeno dodavanjem eksplicitnog "padding" polja u
+`TrapFrame`, umesto da se samo promeni broj u assertu — struct sada iskreno
+odražava stvarnu alokaciju.
+
+### Faza 2 — Iskreniji test harness
+Originalni testovi su samo ispisivali poruke i pretpostavljali uspeh (banner
+"SVI TESTOVI PROŠLI SA 100%" bez ijedne stvarne provere). Uveden
+`TestRunner` koji **stvarno proverava uslove** (null-check, poravnanje,
+preklapanje blokova, rubni slučajevi) i ispisuje iskren rezime `X / Y
+testova prošlo`.
+
+### Faza 3 — `os-novo2` i pokušaj integracije `h/`/`src/` (originalni OS1 kod)
+Korisnik je okačio na GitHub i originalni fakultetski kod (`h/`, `src/`
+folderi: `TCB`, `Scheduler`, `_sem`, `MemoryAllocator`, `contextSwitch.S`,
+`riscv.cpp`...) sa idejom da se integriše u nezavisno okruženje.
+
+**Nalazi pregleda:**
+- `hw.h`/`console.h`/`mem.h` sadrže **samo deklaracije** (typedef-ovi,
+  `extern` potpisi) — nema stvarne "profesorove" logike. Prava zaključana
+  stvar je samo kompajlirani `.lib` (konkretne adrese, implementacije
+  `__putc`/`__mem_alloc`/`plic_claim`). Ovo se dalo rešiti pisanjem
+  sopstvenog `platform.hpp` sa istim imenima, ali vrednostima izvedenim iz
+  sopstvenog `kernel.ld`/QEMU dokumentacije.
+- **Veći problem:** ceo trap-handling kod je pisan za **supervisor (S)
+  režim** (`sepc`, `sstatus`, `sret`, `scause`) jer je `xv6` prethodno radio
+  delegaciju M→S moda. Naš nezavisan kernel radi isključivo u **M-modu**.
+  Trebalo bi portovati S-mode CSR pozive u M-mode ekvivalente.
+- Postoje dva paralelna trap fajla (`trap.S` sa eksplicitno markiranim
+  "trenutno se ne koristi" kodom) — mrtav kod iz ranije faze razvoja.
+- `src/main.cpp` je **nedovršen** — stvarno kreiranje niti je zakomentarisano,
+  nikad end-to-end testirano u toj formi.
+
+**Odluka (posle razmatranja opcija A/B):** korisnik je izabrao da ide **što
+dalje od originalnog projekta** — ne portovati postojeći S-mode kod, nego
+napisati trap/scheduler "lepak" iznova, čisto za M-mode, zadržavajući samo
+*ideje* (niti, semafori, alokator) kao koncept, ne kod. Prioritet: da
+projekat bude moderan i u skladu sa trenutnim tendencijama, čak i ako to
+znači pisanje većine stvari ponovo.
+
+### Faza 4 — Sveži restart: plan i gradnja iznova
+Definisana savremena arhitektura (Scheduler kao apstrakcija, `TCB` sa
+`enum class ThreadState`, `Semaphore` sa API-jem spremnim za priority
+inheritance kasnije, syscall dispatch preko `enum class` umesto magičnih
+heksova) i redosled gradnje:
+
+1. Timer interrupt (CLINT) — ✅ **gotovo**
+2. TCB + context switch (kooperativno) — ✅ **gotovo**
+3. Preemptive round-robin scheduler — ✅ **gotovo**
+4. Semafori — ✅ **gotovo**
+5. CI pipeline (GitHub Actions) — ✅ **gotovo (kod strane); workflow fajl
+   još nije okačen na GitHub — odloženo, `.github/workflows/` mora ići na
+   koren repoa, ne u `os-novoN` podfolder, vidi Fazu 7)**
+
+### Faza 5 — `os-novo3`: preemptivni scheduler (korak 3)
+Novi folder na GitHub-u (`os-novo3`) — root fajlovi iz koraka 2, plus
+originalni `h/`/`src/` fakultetski kod zadržan **samo informativno** (nije
+korišćen, nije integrisan).
+
+`switchInto`/`yieldToMain` iz koraka 2 (kooperativno, main ručno bira ko je
+na redu) zamenjeni su pravim schedulerom:
+- **`scheduler.hpp`/`scheduler.cpp`** — ready red kao intruzivna kružna
+  lista preko `TCB::next` (bez ijedne dodatne alokacije za čvorove).
+  `schedulerRun()` dequeue-uje nit i radi `contextSwitch` u nju;
+  `schedulerTick()` (pozvan iz `handleTrap` na tajmer prekid) trenutnu nit
+  vraća u red i prebacuje kontrolu nazad na scheduler petlju.
+  `schedulerRequestStopAfter(N)` omogućava testiranje (zaustavi posle N
+  tik-ova) umesto da petlja radi zauvek.
+- **Test:** dve niti sa **beskonačnim petljama** koje nikad same ne
+  ustupaju procesor — jedini način da obe napreduju je da ih tajmer
+  *prinudno* smenjuje. Ako oba brojača rastu, preotimanje stvarno radi.
+
+**Uhvaćen i ispravljen kritičan bag pre testiranja na hardveru/QEMU-u:**
+`contextSwitch` ne prolazi kroz `mret` (to je "sirov" register-swap preko
+callee-saved registara, ne pravi trap-return), pa **ne restaurira
+`mstatus.MIE`** automatski. Kad se nit prekine usred trapa, `MIE` ostaje
+"zaglavljen" na 0 (hardver ga automatski čisti pri ulasku u bilo koji trap)
+sve dok se *baš ta konkretna* nit kasnije prirodno ne nastavi kroz sopstveni
+`mret`. Bez eksplicitne ispravke: **druga nit koju scheduler ikad pokrene**
+(prva ikad da se izvršava, dispatch-ovana odmah nakon što je neka DRUGA nit
+već bila prekinuta) startovala bi sa isključenim prekidima — i pošto nijedna
+od test-niti nikad sama ne ustupa procesor, nikad ne bi bila preuzeta →
+**trajno zamrzavanje testa, bez ijedne poruke greške** (najgora vrsta baga
+za debug). Ispravka: eksplicitno paljenje `mstatus.MIE` pre SVAKOG
+dispatch-a u `schedulerRun()`, ne oslanjanje na prirodno restauriranje kroz
+`mret`.
+
+**Rezultat testa:** oba brojača (A: ~92M, B: ~1.8B) su rasla — dokaz da
+preotimanje radi (A ne bi nikad sama ustupila procesor). Velika razlika u
+brzini (B ~20x brža od A) najverovatnije je posledica **QEMU TCG JIT
+zagrevanja** — prvi prolazak kroz blok koda se interpretira/prevodi, naredni
+prolasci kroz već-prevedeni blok su brži; pošto A radi prva (hladan start)
+a B profitira od već zagrejanog prevodioca za skoro identičan kod, asimetrija
+ima smisla. Na pravom silikonu ovoga ne bi bilo u ovoj razmeri (hardver nema
+JIT) — vredna napomena za README kao svesna razlika emulacije naspram
+pravog hardvera.
+
+### Faza 6 — `os-novo4`: semafori (korak 4)
+Dodati `semaphore.hpp`/`semaphore.cpp` — prost brojački semafor sa
+blokirajućim redom čekanja (`waitHead`/`waitTail`, ista intruzivna-lista
+tehnika kao ready red, deli `TCB::next` polje jer nit u svakom trenutku
+može biti u najviše jednom od dva reda).
+
+**Test:** klasičan bounded-buffer producer-consumer. Producer ubacuje 10
+vrednosti (1..10) u kružni bafer veličine 4 (`emptySlots`/`filledSlots`/
+`mutex` semafori); consumer ih sabira. Deterministička provera: suma mora
+biti tačno **55** — ako bi neka stavka bila izgubljena ili duplirana zbog
+race condition-a, suma bi odstupala. Bitna osobina ovog testa: **ne zavisi
+od tajmera da bi napredovao ispravno** — blokirajući semafori sami teraju
+producer/consumer da se smenjuju čim se bafer napuni/isprazni; tajmer je tu
+samo kao gornja granica za slučaj da nešto zapne.
+
+**Dva bagova uhvaćena i ispravljena pre testiranja:**
+
+1. **Kritična sekcija oko provere-i-izmene semafora.** `semWait`/`semSignal`
+   proveravaju i menjaju `value` — bez zaštite, tajmer prekid bi mogao da
+   upadne *tačno* između provere (`value > 0`) i dekrementa, i pusti dve
+   niti da vide istu (zastarelu) vrednost, dozvoljavajući da obe "prođu"
+   kroz semafor koji je trebalo da propusti samo jednu. Rešeno dodavanjem
+   `disableInterrupts()`/`restoreInterrupts()` helpera u `riscv.hpp` — kratko
+   isključe prekide oko provere-i-izmene, pa ih vrate u prethodno stanje
+   (ne "na silu" pale ako su već bili isključeni — bezbedno za ugnježdene
+   pozive).
+2. **`ticksUntilStop` odbrojavanje se zaustavljalo kad nema aktivne niti.**
+   `schedulerTick()` je prvobitno odbrojavao tik-ove SAMO unutar grane koja
+   preuzima trenutnu nit (`if (currentTcb != nullptr)`). Dok su niti u
+   koraku 3 bile beskonačne petlje (uvek je neka nit aktivna), ovo se nije
+   primetilo. Ali kad producer/consumer *završe* (state → `Finished`) pre
+   isteka traženih tik-ova, `currentTcb` postaje `nullptr`, odbrojavanje se
+   zauvek zaustavlja, i `schedulerRun()` visi u `wfi`-petlji zauvek.
+   Ispravljeno odvajanjem odbrojavanja od logike preuzimanja trenutne niti.
+
+**Rezultat testa:** `Proizvedeno: 10 / Potroseno: 10 / Suma: 55` — tačno
+očekivano, bez ijedne izgubljene ili duplirane stavke.
+
+**Poznata neefikasnost (nije bag):** pošto `schedulerRun()` nema "prekini
+čim nema više posla" logiku, program posle završetka producer/consumer
+niti i dalje čeka da istekne svih 20 traženih tik-ova (do ~4s) pre nego što
+nastavi dalje. Kandidat za doterivanje kasnije ako postane iritantno.
+
+### Faza 7 — `os-novo5`: CI pipeline, poweroff mehanizam (korak 5)
+
+**Problem pre ovog koraka:** kernel se nikad sam nije gasio (`while(true)
+wfi;` na kraju `main()`-a) — u CI-ju bi to značilo da build "visi" zauvek
+bez ijednog pouzdanog signala da li su testovi prošli, sem nagađanja preko
+timeout-a i grep-ovanja ispisa.
+
+**Rešenje — SiFive test/poweroff uređaj.** QEMU `virt` mašina emulira ovaj
+uređaj na fiksnoj adresi `0x100000`; upis `0x5555` stvarno gasi QEMU proces
+sa exit kodom `0`, upis `0x3333` sa exit kodom `1`. Dodato u `riscv.hpp`
+(`RISCV::Poweroff::exitQemu`), pozvano na kraju `main()`-a na osnovu da li
+su svi testovi prošli (`tests.passed == tests.total`).
+
+**Dva efekta ove izmene:**
+1. **Lokalno:** program se sam gasi posle testova — više nije potrebno
+   ručno `Ctrl+A` pa `X` da se izađe iz QEMU-a. Potvrđeno testiranjem:
+   `make run; echo "Exit kod: $?"` → **`Exit kod: 0`** kad su svi testovi
+   prošli (11/11).
+2. **CI:** `make run` sad vraća pravi exit kod, pa GitHub Actions može da
+   markira build kao neuspešan ako bar jedan test padne, bez ijedne linije
+   grep-ovanja izlaza -- samo standardni "exit code != 0 = fail" mehanizam.
+
+**Potvrđen paket za CI runner:** `gcc-riscv64-unknown-elf` na Ubuntu-u je
+eksplicitno build-ovan sa `--disable-libstdc++-v3 --without-newlib
+--with-headers=no` -- ovo direktno potvrđuje i objašnjava zašto ovaj
+toolchain od početka nema `<cstdint>`/`<cstddef>` (Faza 1), i da je to
+tačno paket koji odgovara lokalnom setup-u. `qemu-system-misc` pokriva
+RISC-V mete na Ubuntu 24.04 (vidi raniju analizu paketa).
+
+**Workflow fajl je napisan** (`.github/workflows/build-and-test.yml`) ali
+**još nije okačen na GitHub** -- odloženo po dogovoru. Važna napomena za
+kad se okači: GitHub Actions prepoznaje workflow fajlove SAMO u
+`.github/workflows/` na **korenu** repoa, ne unutar `os-novoN` podfoldera.
+Workflow već ima `working-directory: os-novo5` podešeno da uđe u pravi
+folder za build korake -- **tu liniju treba ažurirati** kad se pređe na
+sledeći folder ili na konačan/samostalan repo.
+
+### Faza 8 — SMP: pravi multi-hart scheduler ("escape" ideja #1)
+
+Prva od "escape" ideja iz Faze 4 -- najveći i najrizičniji korak do sada,
+jer po prvi put uvodi **pravu fizičku konkurenciju** (više hartova radi
+*istovremeno*, ne samo naizmenično preko preotimanja na jednom jezgru).
+Dosadašnji `disableInterrupts()` trik **ne pomaže ovde** -- štiti samo od
+prekida na *istom* hartu, ne od drugog fizičkog jezgra koje radi paralelno.
+Trebalo je uvesti pravu sinhronizaciju preko RISC-V atomskih instrukcija.
+
+**QEMU podešavanje:** `-smp 2` u `QEMUFLAGS` (dva harta).
+
+**Novi fajlovi:**
+- **`spinlock.hpp`** -- test-and-set spinlock preko `amoswap.w.aq/rl`
+  (RISC-V 'A' ekstenzija). Za razliku od `disableInterrupts()`, ovo
+  stvarno blokira DRUGI hart, ne samo prekide na istom.
+- **`smp.hpp`/`smp.cpp`** -- `MaxHarts` konstanta, `smpSignalStart()`/
+  `smpWaitForStart()` (hart 1 čeka dok hart 0 ne završi jednonitne
+  testove pre nego što se pridruži schedulerU -- izbegava preplitanje
+  UART ispisa dok su testovi alokatora/tajmera još u toku), i
+  `secondaryHartMain()` (ulazna tačka za hart != 0, pozvana iz `boot.S`).
+
+**Izmenjeni fajlovi (SMP dotiče skoro sve):**
+- **`boot.S`** -- svaki hart čita sopstveni `mhartid` CSR (bez ikakve
+  firmware/SBI pomoći, radi i sa `-bios none`) i dobija svoju "krišku"
+  steka iz zajedničkog `.bss` regiona (`MAX_HARTS * PER_HART_STACK_SIZE`).
+  Hart 0 zove `main()`; ostali idu u `secondaryHartMain()`.
+- **`riscv.hpp`** -- `hartId()` helper (čita `mhartid`), CLINT
+  `writeMtimecmp`/`armPeriodicTimer` generalizovani da interno indeksiraju
+  po `hartId()` umesto hardkodovanog harta 0 (stari pozivi ostaju
+  ispravni bez izmene -- na hartu 0 se `hartId()` razrešava u 0).
+- **`thread.hpp`/`thread.cpp`** -- `TCB` dobija `homeHart` polje.
+- **`scheduler.hpp`/`.cpp`** -- ready red, `currentTcb`, `schedulerContext`
+  postaju **nizovi indeksirani po hartu** (po jedan set po jezgru), sve
+  zaštićeno spinlock-om (`readyQueueLock`). Svaka nit se dispatch-uje
+  ISKLJUČIVO na svom `homeHart`-u.
+- **`semaphore.hpp`/`.cpp`** -- `Semaphore` dobija sopstveni spinlock;
+  `semWait`/`semSignal` sada moraju štititi i od paralelnog harta, ne
+  samo od prekida na istom.
+- **`kalloc.cpp`** -- bump alokator zaštićen spinlock-om (bezbedan i ako
+  bi ga neko pozvao sa oba harta, iako trenutni testovi to ne rade).
+- **`main.cpp`** -- novi `[SMP paralelizam]` test.
+
+**Ključna dizajnerska odluka -- "home hart" pribijanje niti.** Pošto se
+`mepc`/`mstatus` (stanje trapa) ne čuvaju eksplicitno u `TCB`-u, nego se
+oslanjamo na prirodno odmotavanje kroz `mret` na ISTOM hartu koji je
+preuzeo trap (isti mehanizam kao u Fazi 5/koraku 3), nit **ne sme** da
+migrira između hartova posle preotimanja -- drugi hart bi izvršio `mret`
+sa SVOJIM (pogrešnim) CSR stanjem. Rešenje: svaka nit se trajno "prikuje"
+za hart na kom je prvi put pokrenuta (round-robin dodela pri kreiranju) i
+tu ostaje ceo život. Ready redovi i `currentTcb` su zato per-hart nizovi,
+ne jedna deljena struktura.
+
+**Redosled otključavanja pre blokirajućeg poziva** (`semaphore.cpp`) --
+semaforova brava se MORA otključati pre `schedulerBlockCurrent()`, jer bi
+držanje brave preko potencijalno dugog bloka zaustavilo SVAKI drugi hart
+koji pokuša da uđe u isti semafor -- gore i od klasičnog "spinlock held
+across sleep" problema, jer traje neodređeno dugo.
+
+**Test:** `[SMP paralelizam]` -- dve niti (svaka na svom hartu) mere
+sopstveni vremenski prozor (`mtime` na početku/kraju zauzete petlje) i
+proveravaju da se prozori **preklapaju** -- jedini pouzdan način da se
+razlikuje "stvarno paralelno na dva jezgra" od "naizmenično na jednom".
+
+**Bag uhvaćen tek pri kompajliranju (ne pri pregledu koda):** `main.cpp`
+je pozivao `RISCV::Clint::readTime()`, dok `riscv.hpp` definiše
+`readMtime()` -- prosta neusklađenost imena, kompajler je odmah prijavio
+grešku sa jasnim predlogom ispravke. Dobar podsetnik da čak i posle
+pažljivog ručnog pregleda koda, kompajler i dalje hvata stvari koje oko
+preskoči -- oba su potrebna, ni jedno ne zamenjuje drugo.
+
+**Rezultat testa:** `A: [92140104, 93090344]`, `B: [92140072, 93129966]`
+-- prozori se jasno preklapaju, potvrđena prava paralelnost. Zanimljiva
+sporedna potvrda: brojači u `[Preemptivni scheduler]` testu su sada MNOGO
+bliži (307M vs 204M, ranije 92M vs 1.8B na jednom hartu) -- deo ranije QEMU
+JIT asimetrije (Faza 5) je nestao kad niti rade na odvojenim hartovima
+umesto da dele jedan izvršni tok.
+
+**Napomena bez akcije (linker upozorenje):** `riscv64-unknown-elf-ld:
+warning: kernel.elf has a LOAD segment with RWX permissions` -- kernel i
+dalje radi ispravno; `kernel.ld` trenutno ne razdvaja izvršni i podatkovni
+segment po dozvolama (sve je Read-Write-Execute u jednom). Nije hitno, ali
+je legitiman kandidat za buduće poliranje (W^X razdvajanje je standardna
+sigurnosna praksa).
+
+**Napomena za README/intervju (nije menjano u kodu):** `smpWindowA`/
+`smpWindowB` se pišu na jednom hartu a čitaju na drugom bez eksplicitne
+`fence` instrukcije. Na QEMU TCG emulaciji ovo u praksi radi pouzdano
+(softverska emulacija je efektivno sekvencijalno konzistentna), ali na
+PRAVOM slabo-uređenom RISC-V silicijumu bi formalno trebalo `fence` pre
+čitanja da se garantuje vidljivost -- dobra tema za pokazivanje da se
+razume razlika između "radi na emulatoru" i "formalno ispravno na pravom
+hardveru".
+
+### Faza 9 — Profiling/tracing alat ("escape" ideja #2) + otkriven pravi race condition
+
+**Cilj:** vizuelno zaokružiti SMP rad — umesto da se veruje samo brojevima
+u testovima, alat koji pokazuje KO je radio GDE i KADA.
+
+**Kernel strana** (`trace.hpp`/`trace.cpp`, novi fajlovi): fiksni bafer od
+512 zapisa (`TraceRecord`: `mtime` timestamp, `threadId`, `hartId`,
+`TraceEvent` — Dispatch/Preempted/Blocked/Woken/Finished), zaštićen
+sopstvenim spinlock-om. Instrumentisani postojeći `scheduler.cpp`
+(`schedulerRun`/`schedulerTick`/`schedulerYieldFinished`/`schedulerWake`) i
+`semaphore.cpp` (`semWait`-ov blocking put) na tačnim mestima gde se stanje
+niti menja — **bez** pravljenja posebne veštačke scene, trag hvata baš ono
+što se dešava kroz već postojeće testove. Dodat `TCB::id` (redni broj,
+dodeljen u `createThread`, zaštićen sopstvenim spinlock-om) da se niti mogu
+razlikovati u tragu. Novi `[Profiling trag]` test na kraju `main()`-a
+ispisuje ceo trag kao parsable CSV (`TRACE,timestamp,hart,threadId,event`)
+preko UART-a.
+
+**Bag uhvaćen PRE slanja korisniku (code review, ne test):**
+`traceRecord()` nije bio zaštićen od samo-zaključavanja — poziv
+`traceRecord(Dispatch, ...)` u `schedulerRun()` dešava se odmah POSLE
+ponovnog uključivanja prekida, a PRE `contextSwitch`-a. Da je tajmer prekid
+stigao baš u tom uskom prozoru, `schedulerTick()` bi na ISTOM hartu
+pokušao da ponovo uđe u `traceRecord` (za `Preempted` zapis) i zauvek se
+zaglavio čekajući bravu koju sam već drži. Ispravljeno dodavanjem
+`disableInterrupts()`/`restoreInterrupts()` oko cele funkcije, dosledno
+ostatku koda (isti razlog zašto `readyQueueLock`/`sem->lock` uvek idu
+ZAJEDNO sa `disableInterrupts()`, ne umesto njega).
+
+**Host strana** (`tools/trace-viewer.html`, novi fajl): samostalan HTML,
+radi offline (jedina spoljna zavisnost je Google Fonts). Parsira nalepljeni
+CSV izlaz i crta Gantt dijagram preko SVG-a — traka po hartu, obojena po
+niti (interval od `DISPATCH` do sledećeg `PREEMPTED`/`BLOCKED`/`FINISHED`
+na istom hartu), sa malim trouglastim oznakama za `WOKEN` događaje. Tamna,
+monospace ("IBM Plex Mono") tema u duhu terminal/profiler alata, namerno
+odabrana da odražava tematiku (UART/serijska konzola je i doslovno odakle
+sav ispis u projektu potiče).
+
+**Pravi race condition otkriven ODMAH pri prvom pokretanju** (ovo je
+najvredniji rezultat cele faze): prvi test posle dodavanja tracing-a je
+pao — `[SMP paralelizam]` je prijavio `B: [0, 0]` (workerB nikad nije
+izvršen), iako je identičan test prethodno prolazio 13/13. Analiza trag-a
+je pokazala da se hart 1 potpuno prestao javljati posle
+`t≈90187840` — tačno na granici između `[Semafori]` i `[SMP paralelizam]`
+testa.
+
+*Uzrok:* `secondaryHartMain()` je pozivao `schedulerRun()` **samo jednom**.
+`main()` na hartu 0 poziva `schedulerRequestStopAfter()` VIŠE PUTA — jednom
+po test bloku — što svaki put resetuje deljenu `stopRequested` promenljivu
+nazad na `false`. Hart 0 to zna jer eksplicitno poziva `schedulerRun()`
+iznova za svaki sledeći test; hart 1 nije imao način da sazna da je stigao
+novi krug, pa se posle PRVOG `stopRequested == true` trajno parkirao u
+`wfi` petlji, misleći da je program pri kraju.
+
+*Zašto je "radilo" pre dodavanja profilinga:* čista sreća u tajmingu — hart
+0 je ranije stizao da pozove `schedulerRequestStopAfter()` (resetujući
+`stopRequested` nazad na `false`) PRE nego što bi hart 1 uopšte primetio
+prolaznu `true` vrednost svojim `while(!stopRequested)` uslovom. Ovo je bio
+**latentan bag od trenutka kad je SMP napravljen** (Faza 8) — dodatni
+`traceRecord` pozivi (svaki sa sopstvenim spinlock-om/`disableInterrupts`
+troškom) pomerili su tajming taman dovoljno da se ta trka ovog puta reši
+na pogrešnu stranu i bag postane vidljiv.
+
+*Ispravka:* `secondaryHartMain()` sada poziva `schedulerRun()` u
+beskonačnoj petlji (`while (true) { schedulerRun(); }`) umesto jednom —
+hart 1 se sada ponaša kao trajni "radnik" koji uvek ponovo proverava da li
+ima posla, umesto da se jednokratno "penzioniše" posle prvog završenog
+test bloka.
+
+**Zašto je ovo posebno vredna priča za CV/intervju:** profiler nije samo
+"lep dodatak" — doslovno je, prvi put kad je pušten, otkrio pravi,
+latentan race condition koji su standardni PASS/FAIL testovi propuštali
+(testovi provere KRAJNJE stanje, ne KAKO se do njega stiglo — trag pokazuje
+baš to). Konkretan, proverljiv primer da alat za dijagnostiku pronalazi
+probleme koje obični testovi ne mogu.
+
+### Dopuna — empirijska potvrda i odluka o `os-novo6`/`os-novo7`
+
+**`os-novo6` je obrisan iz repoa.** Bio je nepotpuna/nekonzistentna
+instantanca (verovatno greška pri ručnom kopiranju foldera, bez git-a) —
+`main.cpp` je već bio SMP verzija (`#include "smp.hpp"`), ali `smp.hpp`/
+`smp.cpp`/`spinlock.hpp` uopšte nisu postojali u tom folderu, a `Makefile`
+je ostao na `-smp 1` bez `smp.cpp` u `CXX_SRCS` — ne bi ni mogao da se
+kompajlira. `os-novo7` je već ispravna, kompletna verzija tog istog koraka.
+
+**Bag iz Faze 9 je naknadno EMPIRIJSKI potvrđen i u `os-novo7` samom** —
+korisnik je prijavio da `os-novo7` (bez profiling instrumentacije, dakle
+BEZ dodatnog tajming pomeraja koji je bag prvi put učinio vidljivim)
+povremeno ipak pokaže `11/13` sa `B: [0, 0]` na `[SMP paralelizam]` testu.
+Ovo je tačno očekivano ponašanje prave trkačke greške: pošto je ishod
+zavisan od tajminga (da li hart 0 stigne da resetuje `stopRequested` pre
+nego što ga hart 1 primeti), rezultat varira od pokretanja do pokretanja
+zavisno od varijacija u QEMU TCG izvršavanju (JIT zagrevanje, opterećenje
+host mašine u tom trenutku). Da je uzrok bio nešto drugo, ponašanje bi bilo
+ili uvek ispravno ili uvek pogrešno — baš ta povremenost je potpis prave
+trke, i dodatna potvrda da je dijagnoza iz Faze 9 tačna.
+
+**Odluka:** `os-novo7` je namerno **ostavljen neispravljen** (fix postoji u
+`os-novo8`, proverio sam da je `smp.cpp` iz `os-novo8` čist drop-in zamena
+bez ijedne druge zavisnosti — nijedna druga izmena nije potrebna ako bi se
+ipak odlučilo da se `os-novo7` popravi naknadno). Namerna odluka da se
+ostavi kao autentičan "pre popravke" snapshot — verodostojan dokaz da je
+bag stvarno postojao i pre nego što je otkriven, ne samo teoretska
+konstrukcija.
+
+---
+
+## 3. Trenutno stanje koda (posle Faze 9 / profiling alat)
+
+### Fajlovi i odgovornosti
+
+| Fajl | Odgovornost |
+|---|---|
+| `boot.S` | Boot sekvenca za SVAKI hart (čita `mhartid`, dobija svoju krišku steka), postavljanje `mtvec`, `trap_vector` (SAVE_REGS/RESTORE_REGS makroi, poziva `handleTrap`). Hart 0 → `main()`, ostali → `secondaryHartMain()` |
+| `kernel.ld` | Linker script — memorijski layout, `end` simbol (početak heap-a) |
+| `riscv.hpp` | RISC-V specifični detalji: builtin tipovi (bez `<cstdint>`), `enum class Csr`, generička `readCsr`/`writeCsr` template funkcija, CLINT (tajmer) registri (per-hart preko `hartId()`), `enum class TrapCause`, `TrapFrame` struct sa layout proverama, `RISCV::Poweroff::exitQemu` |
+| `spinlock.hpp` | Test-and-set spinlock preko `amoswap.w.aq/rl` — prava sinhronizacija između fizički različitih hartova (za razliku od `disableInterrupts()`) |
+| `smp.hpp` / `smp.cpp` | `MaxHarts`, `smpSignalStart`/`smpWaitForStart` (hart 1 čeka da hart 0 završi jednonitne testove), `secondaryHartMain` |
+| `uart.cpp` | NS16550A UART drajver (`putc`/`getc`/`printString`) na QEMU `virt` adresi `0x10000000` — trenutno bez spinlock-a (dovoljno, jer samo hart 0 poziva UART funkcije u trenutnom dizajnu) |
+| `kalloc.cpp` | Bump alokator (`kalloc`/`kfree`), zaštićen spinlock-om (SMP-bezbedan iako trenutni testovi ne pozivaju kalloc sa oba harta) |
+| `thread.hpp` / `thread.cpp` | `Context` (14 callee-saved registara), `TCB` (sa `next` za ready-listu, `homeHart`, i `id` za profiling trag), `createThread`, `threadTrampoline` |
+| `scheduler.hpp` / `scheduler.cpp` | Ready redovi PO HARTU (niz, ne jedna deljena lista), zaštićeni spinlock-om. `schedulerRun`, `schedulerTick`, `schedulerAddThread` (round-robin dodela `homeHart`-a), `schedulerRequestStopAfter`, `schedulerYieldFinished`, `schedulerBlockCurrent`, `schedulerWake` — sve instrumentisano `traceRecord` pozivima |
+| `semaphore.hpp` / `semaphore.cpp` | Brojački semafor (`semInit`/`semWait`/`semSignal`) sa sopstvenim spinlock-om; brava se otključava PRE blokirajućeg poziva da ne zaustavi druge hartove |
+| `trace.hpp` / `trace.cpp` | Profiling/tracing bafer (512 zapisa), `traceRecord`/`traceDump`/`traceCount`/`traceHasEventOnHart`, zaštićen sopstvenim spinlock-om + `disableInterrupts()` |
+| `contextSwitch.S` | Asemblerska rutina koja menja `ra`/`sp`/`s0`-`s11` između dva `Context`-a |
+| `main.cpp` | Test harness (`TestRunner`) + redom: konzola, CSR, alokator, tajmer, scheduler, semafori, SMP paralelizam, **profiling trag**, trap/ecall testovi; na kraju `RISCV::Poweroff::exitQemu` |
+| `Makefile` | Build (riscv64 toolchain) + `make run` (QEMU, `-smp 2`) |
+| `.github/workflows/build-and-test.yml` | CI: instalira toolchain, builduje, `make run` — exit kod iz poweroff mehanizma direktno određuje prolaz/pad builda. **Napisan, još nije okačen na GitHub.** |
+| `tools/trace-viewer.html` | Samostalan HTML alat (offline) — parsira nalepljeni CSV trag i crta Gantt dijagram po hartu preko SVG-a |
+
+### Test status
+Trenutno **15/15 testova prolazi** (`make clean && make run`, `-smp 2`):
+- UART ispis
+- CSR čitanje (`mstatus`)
+- Alokator: non-null, ne-preklapanje, poravnanje, rubni slučaj (`kalloc(0)`)
+- Tajmer: bar 5 CLINT prekida primljeno
+- Preemptivni scheduler: dve niti sa beskonačnim petljama, oba brojača
+  rastu bez ijednog dobrovoljnog ustupanja procesora (sada realno na dva
+  harta — brojači znatno bliži nego u single-hart verziji)
+- Semafori: bounded-buffer producer-consumer, 10 stavki proizvedeno i
+  potrošeno, suma tačno 55
+- SMP paralelizam: dve niti, svaka na svom hartu, mere vremenski
+  prozor preko `mtime` i potvrđuju da se preklapaju — dokaz prave
+  fizičke paralelnosti, ne samo naizmeničnog deljenja jednog jezgra
+- **Profiling trag:** trag sadrži razuman broj događaja (>10) i događaje sa
+  OBA harta — dokaz da profiler stvarno vidi SMP aktivnost
+- Trap/ecall: `mcause` tačno odgovara `EcallFromMMode`
+
+Program se posle poslednjeg testa sam gasi (poweroff mehanizam) i vraća
+exit kod `0` (potvrđeno: `make run; echo "Exit kod: $?"` → `Exit kod: 0`).
+
+### Tehničke odluke vredne pomena (za README / intervju)
+
+1. **Builtin tipovi umesto `<cstdint>`** — ovaj toolchain nema freestanding
+   header-e; `__UINT64_TYPE__` i slični GCC/Clang builtin-i rade bez ijednog
+   `#include`-a i tačno odgovaraju standardnim tipovima.
+2. **`__builtin_offsetof` umesto `offsetof`** — iz istog razloga (nema
+   `<cstddef>`).
+3. **`TrapFrame` padding bag** — uhvaćen kroz `static_assert` koji je pukao
+   na pogrešnoj pretpostavci (32 vs. stvarnih 31 sačuvanih registara +
+   padding za 16B poravnanje). Dokaz da su assert-ovi korisni čak i kad ih
+   *ti* pišeš.
+4. **`++` na `volatile` je deprecated u C++20** — kompajler je upozorio;
+   ispravljeno na eksplicitno čitaj-pa-piši (`timerTicks = timerTicks + 1`),
+   jer standard eksplicitno obeležava inkrement/dekrement/compound-assign na
+   `volatile` kao zastarelo (nisu atomski, mogu zavarati).
+5. **`contextSwitch` čuva punih 14 registara** (`ra`, `sp`, `s0`-`s11`), za
+   razliku od originalne (fakultetske) verzije koja je čuvala samo `ra`+`sp`.
+   Originalna verzija se implicitno oslanjala na to da će pozivalac sam
+   sačuvati `s0`-`s11` na svom steku pre poziva — ali RISC-V ABI to ne
+   garantuje eksplicitno ("callee-saved" znači da *pozvana* funkcija ih ne
+   sme izmeniti, ne da će ih *pozivalac* nužno sačuvati). Potencijalno
+   latentan bag, izbegnut eksplicitnim čuvanjem svih 14.
+6. **`TCB` je prost `struct` bez konstruktora** — bez `<new>` header-a nema
+   garantovanog placement new-a, pa se polja popunjavaju ručno posle
+   `kalloc`-a umesto kroz konstruktor.
+7. **Stack poravnanje** — `kalloc` poravnava samo na 8B, a RISC-V ABI
+   zahteva 16B poravnat stek; vrh novo-alociranog thread steka se dodatno
+   poravnava nadole (`alignDown16`) pre upisa u `Context::sp`.
+8. **`mstatus.MIE` se ne restaurira automatski kroz `contextSwitch`** — pošto
+   `contextSwitch` nije `mret`, nego "sirov" register-swap, prekidi ostaju
+   isključeni za novo-dispatch-ovanu nit ako je neka DRUGA nit ranije
+   prekinuta usred trapa. Rešeno eksplicitnim paljenjem `MIE` pre svakog
+   dispatch-a u `schedulerRun()`. Bez ovoga: tiho, potpuno zamrzavanje bez
+   ijedne poruke greške — klasičan primer zašto asinhrone/prekidne putanje
+   traže eksplicitnu, paranoičnu proveru pretpostavki o CPU stanju.
+9. **QEMU TCG JIT zagrevanje kao izvor asimetrije u benchmark brojkama** —
+   dve identične beskonačne petlje (niti A i B) završile su sa vrlo
+   različitim brojem iteracija (B ~20x brža) iako dobijaju uporediv broj
+   tajmer-slice-ova. Objašnjenje: QEMU prvi prolazak kroz blok koda
+   interpretira/prevodi (sporo), naredni prolasci kroz već-prevedeni blok
+   su brži — A "greje" prevodilac za obe niti (skoro identičan kod), B
+   profitira od toga. Bitna napomena kad se izvode zaključci o performansama
+   iz QEMU emulacije naspram pravog hardvera (koji nema JIT).
+10. **Kritična sekcija oko semafora** — `semWait`/`semSignal` proveravaju
+    i menjaju deljeno stanje (`value`, redovi čekanja); bez eksplicitnog
+    isključivanja prekida oko te provere-i-izmene, tajmer prekid bi mogao
+    da upadne tačno u sredinu i izazove race condition (dve niti "prođu"
+    kroz semafor koji je trebalo da propusti samo jednu). Rešeno malim
+    `disableInterrupts()`/`restoreInterrupts()` parom koji vraća prethodno
+    stanje umesto da ga bezuslovno pali — bezbedno i za ugnježdene pozive.
+11. **Odbrojavanje `ticksUntilStop` odvojeno od preuzimanja niti** — bag
+    koji se ne bi ispoljio dok su test-niti beskonačne petlje (uvek postoji
+    aktivna nit), ali postaje kritičan čim niti mogu *završiti* same od
+    sebe: ako `currentTcb` postane `nullptr` pre isteka traženih tik-ova,
+    odbrojavanje se zaustavlja i `schedulerRun()` visi zauvek. Dobar
+    primer zašto testovi treba da pokriju i "srećan put do kraja", ne samo
+    beskonačne/dugotrajne scenarije.
+12. **SiFive poweroff uređaj umesto beskonačne `wfi` petlje na kraju** —
+    QEMU `virt` mašina emulira ovaj uređaj na `0x100000`; upis prave
+    vrednosti stvarno gasi QEMU proces sa odgovarajućim exit kodom (0/1).
+    Rešava i lokalnu neugodnost (ručno gašenje preko `Ctrl+A X`) i
+    omogućava CI da razlikuje prolaz/pad preko standardnog exit-kod
+    mehanizma, bez grep-ovanja teksta iz ispisa.
+13. **"Home hart" pribijanje niti umesto slobodne migracije** — pošto se
+    trap-stanje (`mepc`/`mstatus`) ne čuva eksplicitno po niti, nego se
+    oslanja na prirodno odmotavanje kroz `mret` na ISTOM hartu koji je
+    preuzeo trap, nit koja bi migrirala na drugi hart posle preotimanja
+    bi tamo izvršila `mret` sa POGREŠNIM CSR stanjem. Svaka nit se zato
+    trajno vezuje za hart na kom je kreirana; ready redovi i `currentTcb`
+    postaju per-hart nizovi umesto jedne deljene strukture.
+14. **Redosled otključavanja pre blokirajućeg poziva u semaforu** — brava
+    semafora se mora otključati PRE `schedulerBlockCurrent()`, jer bi
+    držanje brave preko potencijalno dugog bloka zaustavilo svaki drugi
+    hart koji pokuša da uđe u isti semafor — suštinski "spinlock held
+    across sleep" problem, samo gori jer traje neodređeno dugo.
+15. **`disableInterrupts()` nije dovoljan za SMP** — štiti samo od prekida
+    na istom hartu, ne od drugog fizičkog jezgra koje radi paralelno.
+    Prava međusobna isključenost preko više hartova zahteva stvarne
+    atomske instrukcije (`amoswap`) — otuda `spinlock.hpp` kao novi sloj,
+    ne zamena za `disableInterrupts()` nego dopuna (spinlock-ovi se i dalje
+    kombinuju sa `disableInterrupts()` da izbegnu samo-blokiranje ako
+    tajmer prekid na ISTOM hartu upadne dok već držimo bravu).
+16. **`traceRecord` samo-zaključavanje (deadlock)** — nađeno pregledom koda
+    PRE slanja (ne testom): jedno pozivno mesto (`Dispatch` zapis u
+    `schedulerRun()`) dešava se posle ponovnog uključivanja prekida, pa bi
+    tajmer prekid na ISTOM hartu mogao da ponovo uđe u `traceRecord` dok
+    već drži sopstvenu bravu. Ispravljeno istim `disableInterrupts()` +
+    spinlock parom kao svuda drugde — dosledna primena istog principa (#15)
+    na novi, treći slučaj upotrebe.
+17. **Pravi race condition otkriven PROFILEROM, ne testom** (Faza 9,
+    najvredniji nalaz do sada) — `secondaryHartMain()` je pozivao
+    `schedulerRun()` samo jednom, oslanjajući se na to da hart 0 uvek
+    stigne da resetuje `stopRequested` pre nego što ga hart 1 primeti.
+    Latentno od Faze 8 (SMP), "slučajno radilo" zbog povoljnog tajminga,
+    ispoljilo se tek kad su dodati `traceRecord` pozivi blago pomerili
+    tajming. Pokazuje razliku između "testovi prolaze" i "kod je ispravan"
+    — testovi proveravaju KRAJNJE stanje, profiler pokazuje KAKO se do
+    njega stiglo.
+18. **Zašto host-strani vizualizator kao poseban `.html`, ne deo kernela**
+    — kernel nema fajl sistem niti mrežu; jedini izlaz mu je UART tekst.
+    Prirodna podela posla: kernel emituje strukturisan (CSV) trag, alat
+    van kernela ga vizuelno tumači — isti obrazac kao stvarni sistemski
+    alati (npr. Linux ftrace + host-side viewer), ne pokušaj da se
+    grafika ugura u bare-metal okruženje kome to ne pripada.
+
+---
+
+## 4. Plan dalje
+
+Osnovni plan (koraci 1-5) i prve dve "escape" ideje (SMP, profiling alat)
+su **završeni** — kod za sve postoji i testiran je (samo `.yml` okačivanje
+na GitHub je i dalje odloženo). Preostale "escape" ideje, ako se nastavi
+dalje:
+
+### Preostale "escape" ideje
+
+Rangirano po tematskoj povezanosti sa ciljanim oglasom (Tenstorrent, Low
+Level SW Engineering — RISC-V, dev/profiling alati):
+
+1. ~~**SMP (multi-hart) scheduling**~~ — ✅ **gotovo (Faza 8)**. Per-hart
+   ready queue, spinlock-ovi, "home hart" pribijanje niti. (IPI preko
+   CLINT `msip` registra nije implementirano — hart 1 se budi preko
+   sopstvenog periodičnog tajmera, ne preko budnog signala; moglo bi se
+   dodati kasnije ako zatreba brže buđenje iz idle stanja.)
+2. ~~**Profiling/tracing alat**~~ — ✅ **gotovo (Faza 9)**. Kernel-strani
+   trag (`trace.hpp`/`.cpp`) + host-strani Gantt vizualizator
+   (`tools/trace-viewer.html`). Usput otkrio i ispravio pravi, latentan
+   race condition u SMP scheduleru (vidi Fazu 9) — najjača praktična
+   demonstracija vrednosti alata do sada.
+3. **Priority inheritance na semaforima** — rešavanje priority inversion
+   problema; test scenario koji ga namerno izazove pa pokaže rešenje.
+   Napredan OS koncept, redak na nivou studentskog projekta.
+4. **Stack overflow detekcija** — canary vrednosti na dnu thread steka,
+   provera pri context switch-u.
+
+Preporuka za sledeći korak, ako se nastavi: **priority inheritance** je
+sad najjača preostala ideja — napredan, redak koncept koji pokazuje duboko
+razumevanje sinhronizacije, i prirodno se nastavlja na već postojeću
+semafor infrastrukturu.
+
+---
+
+## 5. Build instrukcije (podsetnik)
+
+```bash
+make clean && make run
+```
+
+Toolchain: `riscv64-unknown-elf-g++`/`gcc`/`ld`, `qemu-system-riscv64`
+(dovoljna je Ubuntu 24.04 repo verzija 8.2.2 — RVV/CLINT funkcionalnost
+korišćena ovde ne zahteva noviju).
+
+---
+
+## 6. Veza sa ciljanom pozicijom
+
+Projekat cilja **"Intern Software Engineer – Low Level SW Engineering"**
+(Tenstorrent) — procenjeno kao najbliži trenutnom profilu i najreleventniji
+oglas od tri praćena. Direktne veze:
+
+- *"Design and tune low-level kernels and runtime firmware that directly
+  drive AI-specialized engines and RISC-V cores"* → trap handling, context
+  switch, scheduler — sve na RISC-V, sve na registarskom nivou.
+- *"Build and improve developer tools for debugging, performance
+  monitoring"* → test harness sa stvarnim proverama; **profiling/tracing
+  alat (Faza 9)** — kernel-strani trag + host-strani Gantt vizualizator,
+  koji je usput otkrio pravi race condition u SMP scheduleru.
+- *"Work in Linux-based, system-level environments using C++, Python, shell
+  scripting, and hardware debug tools"* → GDB+QEMU debug tok, bash/Makefile
+  radni ciklus.
+
+---
+
+*Poslednje ažurirano: posle Faze 9 (profiling/tracing alat — potvrđeno
+15/15). Alat je odmah otkrio i ispravio pravi, latentan race condition u
+SMP scheduleru (hart 1 se trajno "penzionisao" posle prvog test bloka —
+vidi Fazu 9 za pun opis). Osnovni plan (1-5), SMP i profiling alat
+završeni; `.yml` okačivanje na GitHub i dalje odloženo. Sledeća odluka:
+priority inheritance ili stack canary — priority inheritance trenutno
+vodi kao preporuka.*

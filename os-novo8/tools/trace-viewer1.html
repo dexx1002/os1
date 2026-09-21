@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="sr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>os-novo trace viewer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #12140f;
+    --bg-panel:  #1a1d16;
+    --ink:       #d9dccb;
+    --ink-dim:   #8b8f7a;
+    --line:      #2c2f24;
+    --amber:     #e8b04b;
+    --green:     #7ec98f;
+    --red:       #d97a6c;
+    --thread-0:  #e8b04b;
+    --thread-1:  #7ec98f;
+    --thread-2:  #7aa2d9;
+    --thread-3:  #d97a6c;
+    --thread-4:  #b78fd9;
+    --thread-5:  #6fc2c9;
+    --thread-6:  #e0975a;
+    --thread-7:  #a3c97a;
+    --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    --sans: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  * { box-sizing: inherit; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.5;
+  }
+  .wrap {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 48px 24px 0;
+  }
+  .wrap-wide {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 24px 80px;
+  }
+  header {
+    margin-bottom: 32px;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 24px;
+  }
+  .kicker {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--amber);
+    margin: 0 0 8px;
+  }
+  h1 {
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: 28px;
+    margin: 0 0 12px;
+    color: var(--ink);
+    letter-spacing: -0.01em;
+  }
+  header p {
+    color: var(--ink-dim);
+    max-width: 62ch;
+    margin: 0;
+    font-size: 15px;
+  }
+  section { margin-bottom: 32px; }
+  label {
+    display: block;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--ink-dim);
+    margin-bottom: 10px;
+  }
+  textarea {
+    width: 100%;
+    min-height: 160px;
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 14px;
+    resize: vertical;
+  }
+  textarea:focus { outline: 1px solid var(--amber); border-color: var(--amber); }
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-top: 14px;
+    flex-wrap: wrap;
+  }
+  button {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 500;
+    background: var(--amber);
+    color: #1a1305;
+    border: none;
+    border-radius: 4px;
+    padding: 10px 18px;
+    cursor: pointer;
+  }
+  button:hover { filter: brightness(1.08); }
+  button.ghost {
+    background: transparent;
+    color: var(--ink-dim);
+    border: 1px solid var(--line);
+  }
+  button.ghost:hover { color: var(--ink); border-color: var(--ink-dim); }
+  button:disabled { opacity: 0.4; cursor: default; }
+  #status { font-family: var(--mono); font-size: 13px; color: var(--ink-dim); }
+  #status.err { color: var(--red); }
+  #status.ok { color: var(--green); }
+
+  .toolbar {
+    display: none;
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 16px 20px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+    gap: 20px;
+    align-items: flex-end;
+    font-family: var(--mono);
+  }
+  .toolbar .field { display: flex; flex-direction: column; gap: 6px; }
+  .toolbar .field span { font-size: 11px; color: var(--ink-dim); }
+  .toolbar input[type="number"] {
+    width: 130px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 7px 8px;
+  }
+  .toolbar input[type="number"]:focus { outline: 1px solid var(--amber); border-color: var(--amber); }
+  .toolbar .threads { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
+  .thread-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ink); cursor: pointer; user-select: none; }
+  .thread-toggle input { accent-color: var(--amber); }
+  .toolbar .btnrow { display: flex; gap: 10px; }
+
+  .panel {
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 24px;
+    overflow-x: auto;
+  }
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 20px;
+    margin-bottom: 20px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-dim);
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
+
+  svg { display: block; }
+  .lane-label {
+    font-family: var(--mono);
+    font-size: 12px;
+    fill: var(--ink-dim);
+  }
+  .axis-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    fill: var(--ink-dim);
+  }
+  .bar-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    fill: #0d0f0a;
+    font-weight: 600;
+  }
+  .grid-line { stroke: var(--line); stroke-width: 1; }
+  .lane-bg { fill: #15170f; }
+
+  .empty {
+    font-family: var(--mono);
+    color: var(--ink-dim);
+    font-size: 13px;
+    padding: 40px 0;
+    text-align: center;
+  }
+  .hint {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-dim);
+    margin: 10px 2px 0;
+  }
+
+  footer {
+    margin-top: 16px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-dim);
+    border-top: 1px solid var(--line);
+    padding-top: 20px;
+  }
+  footer code { color: var(--ink); }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .bar { transition: opacity 0.15s ease; }
+  }
+  .bar:hover { opacity: 0.85; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <p class="kicker">os-novo &middot; profiling / tracing alat</p>
+    <h1>Trace viewer</h1>
+    <p>
+      Nalepi ceo izlaz iz <code style="font-family:var(--mono)">make run</code>
+      (ili samo deo između <code style="font-family:var(--mono)">TRACE START</code>
+      i <code style="font-family:var(--mono)">TRACE END</code> markera) u polje ispod.
+      Alat parsira linije oblika <code style="font-family:var(--mono)">TRACE,timestamp,hart,threadId,event</code>
+      i crta zauzeće svakog harta kroz vreme.
+    </p>
+  </header>
+
+  <section>
+    <label for="input">Trag (CSV izlaz sa QEMU konzole)</label>
+    <textarea id="input" spellcheck="false" placeholder="TRACE,92140104,0,4,DISPATCH
+TRACE,92200311,0,4,PREEMPTED
+..."></textarea>
+    <div class="controls">
+      <button id="render">Vizualizuj</button>
+      <button id="sample" class="ghost">Ucitaj primer</button>
+      <span id="status"></span>
+    </div>
+    <p class="hint">
+      Napomena: stvaran trag iz duže sesije (više testova zaredom) često ima
+      ogroman raspon vremena sa kratkim "zanimljivim" epizodama unutra —
+      zato posle prvog iscrtavanja koristi polja "Fokus" ispod da uveličaš
+      baš taj deo, umesto da sve gledaš zgnječeno na jednoj osi.
+    </p>
+  </section>
+
+</div>
+
+<div class="wrap-wide">
+
+  <div class="toolbar" id="toolbar">
+    <div class="field">
+      <span>Fokus od (mtime)</span>
+      <input type="number" id="focusFrom">
+    </div>
+    <div class="field">
+      <span>Fokus do (mtime)</span>
+      <input type="number" id="focusTo">
+    </div>
+    <div class="btnrow">
+      <button id="applyFocus">Primeni fokus</button>
+      <button id="resetFocus" class="ghost">Resetuj prikaz</button>
+    </div>
+    <div class="field" style="flex:1; min-width:220px">
+      <span>Prikazane niti (isključi "dosadne" da ostale bolje vidiš)</span>
+      <div class="threads" id="threadToggles"></div>
+    </div>
+  </div>
+
+  <section>
+    <div class="panel" id="chartPanel">
+      <div class="empty" id="emptyState">Nema jos ucitanog traga &mdash; nalepi izlaz iznad i klikni &bdquo;Vizualizuj&ldquo;.</div>
+      <div id="legend" class="legend" style="display:none"></div>
+      <svg id="chart" style="display:none"></svg>
+    </div>
+  </section>
+
+  <footer>
+    Format zapisa: <code>TRACE,&lt;mtime&gt;,&lt;hart&gt;,&lt;threadId&gt;,&lt;DISPATCH|PREEMPTED|BLOCKED|WOKEN|FINISHED&gt;</code><br>
+    Trake predstavljaju vreme koje je nit stvarno provela izvršavajući se na datom hartu
+    (od DISPATCH do sledećeg PREEMPTED/BLOCKED/FINISHED na istom hartu).
+    Male oznake ispod traka su WOKEN događaji (nit postala spremna, ne nužno na tom hartu).
+    Grafikon se ne steže veštački da stane u ekran — ako je širi od prozora, panel se horizontalno skroluje.
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  const THREAD_COLORS = [
+    'var(--thread-0)', 'var(--thread-1)', 'var(--thread-2)', 'var(--thread-3)',
+    'var(--thread-4)', 'var(--thread-5)', 'var(--thread-6)', 'var(--thread-7)'
+  ];
+
+  const input        = document.getElementById('input');
+  const renderBtn     = document.getElementById('render');
+  const sampleBtn      = document.getElementById('sample');
+  const statusEl       = document.getElementById('status');
+  const emptyState      = document.getElementById('emptyState');
+  const legendEl         = document.getElementById('legend');
+  const svg                = document.getElementById('chart');
+  const toolbar              = document.getElementById('toolbar');
+  const focusFromEl            = document.getElementById('focusFrom');
+  const focusToEl                = document.getElementById('focusTo');
+  const applyFocusBtn              = document.getElementById('applyFocus');
+  const resetFocusBtn                = document.getElementById('resetFocus');
+  const threadTogglesEl                = document.getElementById('threadToggles');
+
+  const SAMPLE = [
+    'TRACE,92140104,0,4,DISPATCH',
+    'TRACE,92140072,1,5,DISPATCH',
+    'TRACE,92200311,0,4,PREEMPTED',
+    'TRACE,92200311,0,4,DISPATCH',
+    'TRACE,92260522,1,5,PREEMPTED',
+    'TRACE,92260522,1,5,DISPATCH',
+    'TRACE,92400411,0,4,BLOCKED',
+    'TRACE,92400500,1,5,WOKEN',
+    'TRACE,92450233,1,5,PREEMPTED',
+    'TRACE,92450233,0,4,DISPATCH',
+    'TRACE,92600100,0,4,FINISHED',
+    'TRACE,92650411,1,5,DISPATCH',
+    'TRACE,93090344,1,5,FINISHED'
+  ].join('\n');
+
+  // Stanje koje preživljava između Primeni-fokus/checkbox klikova, da ne
+  // moramo ponovo da parsiramo tekst svaki put.
+  let allRecords   = [];
+  let hiddenThreads = new Set();
+
+  function parse(text) {
+    const records = [];
+    const lines = text.split('\n');
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('TRACE,')) continue;
+      const parts = trimmed.split(',');
+      if (parts.length !== 5) continue;
+      const timestamp = Number(parts[1]);
+      const hart      = Number(parts[2]);
+      const threadId  = Number(parts[3]);
+      const event     = parts[4].trim();
+      if (Number.isNaN(timestamp) || Number.isNaN(hart) || Number.isNaN(threadId)) continue;
+      records.push({ timestamp, hart, threadId, event });
+    }
+    records.sort((a, b) => a.timestamp - b.timestamp);
+    return records;
+  }
+
+  // Intervali se UVEK grade iz PUNOG skupa zapisa (ne iz fokusiranog
+  // podskupa) -- inače bismo, ako fokus pocinje usred nekog intervala,
+  // izgubili informaciju "koja nit je vec radila kad je prozor poceo".
+  // Filtriranje/sečenje po fokusu se radi tek pri iscrtavanju.
+  function buildIntervals(records) {
+    const harts = [...new Set(records.map(r => r.hart))].sort((a, b) => a - b);
+    const intervals = []; // { hart, threadId, start, end }
+    const wokenMarks = []; // { timestamp, threadId }
+    const running = {}; // hart -> { threadId, start }
+
+    for (const r of records) {
+      if (r.event === 'WOKEN') {
+        wokenMarks.push({ timestamp: r.timestamp, threadId: r.threadId });
+        continue;
+      }
+      if (r.event === 'DISPATCH') {
+        running[r.hart] = { threadId: r.threadId, start: r.timestamp };
+        continue;
+      }
+      const open = running[r.hart];
+      if (open) {
+        intervals.push({ hart: r.hart, threadId: open.threadId, start: open.start, end: r.timestamp });
+        delete running[r.hart];
+      }
+    }
+    return { harts, intervals, wokenMarks };
+  }
+
+  function threadColor(id) {
+    return THREAD_COLORS[id % THREAD_COLORS.length];
+  }
+
+  function populateThreadToggles(threadIds) {
+    threadTogglesEl.innerHTML = threadIds.map(id => `
+      <label class="thread-toggle">
+        <input type="checkbox" data-thread="${id}" ${hiddenThreads.has(id) ? '' : 'checked'}>
+        <span class="swatch" style="background:${threadColor(id)}"></span>nit ${id}
+      </label>
+    `).join('');
+    threadTogglesEl.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const id = Number(cb.dataset.thread);
+        if (cb.checked) hiddenThreads.delete(id); else hiddenThreads.add(id);
+        draw();
+      });
+    });
+  }
+
+  function draw() {
+    if (allRecords.length === 0) return;
+
+    const { harts, intervals: allIntervals, wokenMarks: allWoken } = buildIntervals(allRecords);
+    const threadIds = [...new Set(allRecords.map(r => r.threadId))].sort((a, b) => a - b);
+
+    const dataMinT = Math.min(...allRecords.map(r => r.timestamp));
+    const dataMaxT = Math.max(...allRecords.map(r => r.timestamp));
+
+    let focusFrom = Number(focusFromEl.value);
+    let focusTo   = Number(focusToEl.value);
+    if (!Number.isFinite(focusFrom)) focusFrom = dataMinT;
+    if (!Number.isFinite(focusTo))   focusTo   = dataMaxT;
+    if (focusFrom >= focusTo) { focusFrom = dataMinT; focusTo = dataMaxT; }
+
+    const minT = focusFrom;
+    const maxT = focusTo;
+    const span = Math.max(maxT - minT, 1);
+
+    // Iseci intervale/oznake na trenutni fokus prozor, i izbaci skrivene niti.
+    const intervals = allIntervals
+      .filter(iv => !hiddenThreads.has(iv.threadId) && iv.end >= minT && iv.start <= maxT)
+      .map(iv => ({ ...iv, start: Math.max(iv.start, minT), end: Math.min(iv.end, maxT) }));
+    const wokenMarks = allWoken.filter(w => !hiddenThreads.has(w.threadId) && w.timestamp >= minT && w.timestamp <= maxT);
+
+    // Sirina platna raste sa gustinom podataka u fokusiranom prozoru --
+    // namerno se NE steže da stane u ekran (vidi .panel { overflow-x: auto }
+    // i svg width u pikselima, ne "100%", ispod). Ciljamo bar nekoliko
+    // piksela po intervalu u proseku, sa razumnim donjim/gornjim ogradama.
+    const targetPxPerInterval = 14;
+    const minWidth = 900;
+    const maxWidth = 6000;
+    const width = Math.min(maxWidth, Math.max(minWidth, intervals.length * targetPxPerInterval));
+
+    const laneHeight = 60;
+    const laneGap    = 14;
+    const marginLeft = 70;
+    const marginTop  = 20;
+    const marginBot  = 30;
+    const plotWidth  = width - marginLeft - 20;
+    const height     = marginTop + harts.length * (laneHeight + laneGap) + marginBot;
+
+    const x = t => marginLeft + ((t - minT) / span) * plotWidth;
+
+    let svgParts = [];
+
+    harts.forEach((hart, i) => {
+      const y = marginTop + i * (laneHeight + laneGap);
+      svgParts.push(`<rect class="lane-bg" x="${marginLeft}" y="${y}" width="${plotWidth}" height="${laneHeight}" rx="4"></rect>`);
+      svgParts.push(`<text class="lane-label" x="12" y="${y + laneHeight / 2 + 4}">Hart ${hart}</text>`);
+    });
+
+    const lastLaneBottom = marginTop + harts.length * (laneHeight + laneGap) - laneGap;
+    for (let i = 0; i <= 6; i++) {
+      const t = minT + (span * i) / 6;
+      const gx = x(t);
+      svgParts.push(`<line class="grid-line" x1="${gx}" y1="${marginTop}" x2="${gx}" y2="${lastLaneBottom}"></line>`);
+      svgParts.push(`<text class="axis-label" x="${gx}" y="${lastLaneBottom + 16}" text-anchor="middle">${Math.round(t)}</text>`);
+    }
+
+    for (const iv of intervals) {
+      const hartIdx = harts.indexOf(iv.hart);
+      const y = marginTop + hartIdx * (laneHeight + laneGap) + 8;
+      const barH = laneHeight - 16;
+      const bx = x(iv.start);
+      const bw = Math.max(x(iv.end) - bx, 2);
+      const color = threadColor(iv.threadId);
+      svgParts.push(
+        `<rect class="bar" x="${bx.toFixed(1)}" y="${y}" width="${bw.toFixed(1)}" height="${barH}" rx="3" fill="${color}">` +
+        `<title>nit ${iv.threadId} na hartu ${iv.hart}: [${iv.start}, ${iv.end}]</title></rect>`
+      );
+      if (bw > 24) {
+        svgParts.push(`<text class="bar-label" x="${(bx + bw / 2).toFixed(1)}" y="${y + barH / 2 + 4}" text-anchor="middle">T${iv.threadId}</text>`);
+      }
+    }
+
+    for (const w of wokenMarks) {
+      const wx = x(w.timestamp);
+      const wy = lastLaneBottom + 2;
+      svgParts.push(`<polygon points="${wx-4},${wy} ${wx+4},${wy} ${wx},${wy+7}" fill="${threadColor(w.threadId)}"><title>nit ${w.threadId} probudjena u t=${w.timestamp}</title></polygon>`);
+    }
+
+    // KLJUČNO: sirina se postavlja u PIKSELIMA, ne "100%" -- inace bi se
+    // SVG uvek stegao da stane u kontejner i horizontalni skrol se nikad
+    // ne bi ni pojavio, bez obzira koliko unutra "nacrtamo" sirok grafikon.
+    svg.setAttribute('viewBox', `0 0 ${width} ${height + 14}`);
+    svg.setAttribute('width', width);
+    svg.setAttribute('height', height + 14);
+    svg.innerHTML = svgParts.join('');
+    svg.style.display = 'block';
+
+    legendEl.innerHTML = threadIds.map(id =>
+      `<span style="opacity:${hiddenThreads.has(id) ? 0.35 : 1}"><span class="swatch" style="background:${threadColor(id)}"></span>nit ${id}</span>`
+    ).join('') + '<span><span class="swatch" style="background:var(--ink-dim);clip-path:polygon(0 0,100% 0,50% 100%)"></span>WOKEN dogadjaj</span>';
+    legendEl.style.display = 'flex';
+
+    emptyState.style.display = 'none';
+    toolbar.style.display = 'flex';
+
+    const focused = (minT !== dataMinT || maxT !== dataMaxT);
+    statusEl.textContent = `${allRecords.length} dogadjaja ukupno, ${intervals.length} intervala prikazano` +
+      (focused ? ` (fokus: ${minT} - ${maxT})` : '') +
+      (hiddenThreads.size > 0 ? `, ${hiddenThreads.size} niti sakriveno` : '') + '.';
+    statusEl.className = 'ok';
+  }
+
+  function loadRecords(records) {
+    if (records.length === 0) {
+      statusEl.textContent = 'Nijedna TRACE, linija nije prepoznata u nalepljenom tekstu.';
+      statusEl.className = 'err';
+      emptyState.style.display = 'block';
+      legendEl.style.display = 'none';
+      svg.style.display = 'none';
+      toolbar.style.display = 'none';
+      return;
+    }
+
+    allRecords = records;
+    hiddenThreads = new Set();
+
+    const dataMinT = Math.min(...records.map(r => r.timestamp));
+    const dataMaxT = Math.max(...records.map(r => r.timestamp));
+    focusFromEl.value = dataMinT;
+    focusToEl.value   = dataMaxT;
+
+    const threadIds = [...new Set(records.map(r => r.threadId))].sort((a, b) => a - b);
+    populateThreadToggles(threadIds);
+
+    draw();
+  }
+
+  renderBtn.addEventListener('click', () => loadRecords(parse(input.value)));
+  sampleBtn.addEventListener('click', () => {
+    input.value = SAMPLE;
+    loadRecords(parse(SAMPLE));
+  });
+  applyFocusBtn.addEventListener('click', draw);
+  resetFocusBtn.addEventListener('click', () => {
+    if (allRecords.length === 0) return;
+    const dataMinT = Math.min(...allRecords.map(r => r.timestamp));
+    const dataMaxT = Math.max(...allRecords.map(r => r.timestamp));
+    focusFromEl.value = dataMinT;
+    focusToEl.value   = dataMaxT;
+    hiddenThreads = new Set();
+    const threadIds = [...new Set(allRecords.map(r => r.threadId))].sort((a, b) => a - b);
+    populateThreadToggles(threadIds);
+    draw();
+  });
+})();
+</script>
+</body>
+</html>
